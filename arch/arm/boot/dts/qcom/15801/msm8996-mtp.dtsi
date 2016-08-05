@@ -744,8 +744,7 @@
 			gpios = <&pm8994_gpios 3 0x1>;
 			linux,input-type = <1>;
 			linux,code = <115>;
-		/*zhiguang.su@MultiMedia.AudioDrv , 2015/1/30, no need wake up*/
-			//gpio-key,wakeup;
+			gpio-key,wakeup;
 			debounce-interval = <15>;
 		};
 
@@ -754,8 +753,7 @@
 			gpios = <&pm8994_gpios 2 0x1>;
 			linux,input-type = <1>;
 			linux,code = <114>;
-		/*zhiguang.su@MultiMedia.AudioDrv , 2015/1/30, no need wake up*/
-			//gpio-key,wakeup;
+			gpio-key,wakeup;
 			debounce-interval = <15>;
 		};
 

@@ -29,13 +29,30 @@
 
 #define DRV_NAME	"tri-state-key"
 
-#define KEYCODE_BASE 600
-#define TOTAL_KEYCODES 6
+/*
+	        KEY1(GPIO1)	KEY2(GPIO92)
+1�ź�4������	0	            1         | MUTE
+2�ź�5������	1	            1         | Do Not Disturb
+4�ź�3������	1	            0         | Normal
+
+*/
+typedef enum {
+	MODE_UNKNOWN,
+	MODE_MUTE,
+	MODE_DO_NOT_DISTURB,
+	MODE_NORMAL,
+	MODE_MAX_NUM
+} tri_mode_t;
+
+#define MODE_TOTAL_SILENCE 600
+#define MODE_ALARMS_ONLY 601
+#define MODE_PRIORITY_ONLY 602
+#define MODE_NONE 603
 
 static int current_mode = 0;
-static int keyCode_slider_top = KEYCODE_BASE + 1;
-static int keyCode_slider_middle = KEYCODE_BASE + 2;
-static int keyCode_slider_bottom = KEYCODE_BASE + 3;
+static int keyCode_slider_top = MODE_ALARMS_ONLY;
+static int keyCode_slider_middle = MODE_PRIORITY_ONLY;
+static int keyCode_slider_bottom = MODE_NONE;
 
 struct switch_dev_data {
 	//tri_mode_t last_type;
@@ -79,19 +96,19 @@ static void switch_dev_work(struct work_struct *work)
 	int mode;
 	mutex_lock(&sem);
 
-	if(!gpio_get_value(switch_data->key3_gpio))
+	if(!gpio_get_value(switch_data->key2_gpio))
 	{
-		mode = 3;	
-		keyCode = keyCode_slider_bottom;
-	}
-	else if(!gpio_get_value(switch_data->key2_gpio))
-	{
-		mode = 2;
+		mode = MODE_DO_NOT_DISTURB;
 		keyCode = keyCode_slider_middle;
+	}
+	else if(!gpio_get_value(switch_data->key3_gpio))
+	{
+		mode = MODE_NORMAL;
+		keyCode = keyCode_slider_bottom;
 	}
 	else if(!gpio_get_value(switch_data->key1_gpio))
 	{
-		mode = 1;
+		mode = MODE_MUTE;
 		keyCode = keyCode_slider_top;
 	}
         if (current_mode != mode) {
@@ -303,7 +320,7 @@ static ssize_t keyCode_top_write(struct file *file, const char __user *page, siz
 
 	if (sscanf(buf, "%d", &data) != 1)
 		return t;
-	if (data < KEYCODE_BASE || data >= (KEYCODE_BASE + TOTAL_KEYCODES))
+	if (data < 600 || data > 603)
 		return t;
 
 	keyCode_slider_top = data;
@@ -347,7 +364,7 @@ static ssize_t keyCode_middle_write(struct file *file, const char __user *page, 
 
 	if (sscanf(buf, "%d", &data) != 1)
 		return t;
-	if (data < KEYCODE_BASE || data >= (KEYCODE_BASE + TOTAL_KEYCODES))
+	if (data < 600 || data > 603)
 		return t;
 
 	keyCode_slider_middle = data;
@@ -391,7 +408,7 @@ static ssize_t keyCode_bottom_write(struct file *file, const char __user *page, 
 
 	if (sscanf(buf, "%d", &data) != 1)
 		return t;
-	if (data < KEYCODE_BASE || data >= (KEYCODE_BASE + TOTAL_KEYCODES))
+	if (data < 600 || data > 603)
 		return t;
 
 	keyCode_slider_bottom = data;
@@ -421,7 +438,6 @@ static int tristate_dev_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct proc_dir_entry *procdir;
 	int error=0;
-	int i;
 
 	//void __iomem *cfg_reg;
 
@@ -433,8 +449,10 @@ static int tristate_dev_probe(struct platform_device *pdev)
 	switch_data->input->name = DRV_NAME;
 	switch_data->input->dev.parent = &pdev->dev;
 	set_bit(EV_KEY, switch_data->input->evbit);
-	for (i = KEYCODE_BASE; i < KEYCODE_BASE + TOTAL_KEYCODES; i++)
-	    set_bit(i, switch_data->input->keybit);
+	set_bit(MODE_TOTAL_SILENCE, switch_data->input->keybit);
+	set_bit(MODE_ALARMS_ONLY, switch_data->input->keybit);
+	set_bit(MODE_PRIORITY_ONLY, switch_data->input->keybit);
+	set_bit(MODE_NONE, switch_data->input->keybit);
 	input_set_drvdata(switch_data->input, switch_data);
 	error = input_register_device(switch_data->input);
 	if (error) {

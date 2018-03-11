@@ -50,7 +50,7 @@
 
 #include <linux/type-c_notifier.h>
 
-#define OTG_WL_HOLD_TIME 5000
+#define OTG_WL_HOLD_TIME 1000
 
 #if (LINUX_VERSION_CODE > KERNEL_VERSION(2, 6, 38))
 #define KERNEL_ABOVE_2_6_38
@@ -908,6 +908,7 @@ static int fusb301_remove(struct i2c_client *client)
         disable_irq_wake(client->irq);
         free_irq(client->irq, info);
     }
+    wake_lock_destroy(&info->otg_wl);
     device_remove_file(info->dev_t, &dev_attr_type);
     device_destroy(info->fusb_class, 0);
     class_destroy(info->fusb_class);

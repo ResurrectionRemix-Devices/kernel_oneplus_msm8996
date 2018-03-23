@@ -115,19 +115,10 @@
 /* If the system has several batteries we need a different name for each
  * of them...
  */
-static DEFINE_IDR(battery_id);
 static DEFINE_MUTEX(battery_mutex);
-
-struct bq27541_device_info;
-struct bq27541_access_methods {
-	int (*read)(u8 reg, int *rt_value, int b_single,
-			struct bq27541_device_info *di);
-};
 
 struct bq27541_device_info {
 	struct device			*dev;
-	int				id;
-	struct bq27541_access_methods	*bus;
 	struct i2c_client		*client;
 	struct work_struct		counter;
 	/* 300ms delay is needed after bq27541 is powered up
@@ -137,6 +128,7 @@ struct bq27541_device_info {
 	struct  delayed_work		battery_soc_work;
 	struct wake_lock update_soc_wake_lock;
 	struct power_supply 	*batt_psy;
+	struct power_supply	bq_psy;
 	int saltate_counter;
 	/*  Add for retry when config fail */
 	int retry_count;
@@ -144,7 +136,6 @@ struct bq27541_device_info {
 	int soc_pre;
 	int  batt_vol_pre;
 	int current_pre;
-	int health_pre;
 	unsigned long rtc_resume_time;
 	unsigned long rtc_suspend_time;
 	atomic_t suspended;
@@ -178,10 +169,13 @@ static spinlock_t lock; /* protect access to coulomb_counter */
 static int bq27541_i2c_txsubcmd(u8 reg, unsigned short subcmd,
 		struct bq27541_device_info *di);
 
+static int bq27541_read_i2c(u8 reg, int *rt_value, int b_single,
+		struct bq27541_device_info *di);
+
 static int bq27541_read(u8 reg, int *rt_value, int b_single,
 		struct bq27541_device_info *di)
 {
-	return di->bus->read(reg, rt_value, b_single, di);
+	return bq27541_read_i2c(reg, rt_value, b_single, di);
 }
 
 /*
@@ -458,35 +452,14 @@ static int fg_soc_calibrate(struct  bq27541_device_info *di, int soc)
 	static bool first_enter = false;
 	static int charging_status, charging_status_pre = 0;
 	bool chg_done;
-	int temp_region, vbat_mv, ibat_ma, soc_load, soc_temp, counter_temp = 0;
+	int temp_region, vbat_mv, ibat_ma, soc_temp, counter_temp = 0;
 
 	if (false == first_enter) {
 		di->batt_psy = power_supply_get_by_name("battery");
 		if(di->batt_psy) {
 			first_enter = true;
-			soc_load = load_soc();
-			pr_info("soc=%d, soc_load=%d\n", soc, soc_load);
-			if (soc_load == -1) {
-				/* get last soc error */
-				di->soc_pre = soc;
-			} else if (soc_load > 0 && soc_load < 100) {
-				if(soc_load > soc)
-					di->soc_pre = soc_load - 1;
-				else
-					di->soc_pre = soc_load;
-			} else if (soc_load == 100
-					&& abs(soc_load - soc) > TEN_PERCENT) {
-				/* decrease soc when gap between soc_load and */
-				/* real_soc is over 10%                       */
-				di->soc_pre = soc_load - 1;
-			} else {
-				di->soc_pre = soc_load;
-			}
+			di->soc_pre = soc;
 
-			if (!di->batt_psy) {
-				pr_err("batt_psy is absent, soc_pre=%d\n", di->soc_pre);
-				return di->soc_pre;
-			}
 			/* store the soc when boot first time */
 			get_current_time(&di->soc_pre_time);
 			clean_backup_soc_ex();
@@ -785,23 +758,6 @@ static int bq27541_remaining_capacity(struct bq27541_device_info *di)
 	return cap;
 }
 
-static int bq27541_batt_health(struct bq27541_device_info *di)
-{
-	int ret;
-	int health = 0;
-
-	if(di->alow_reading) {
-		ret = bq27541_read(BQ27541_REG_NIC, &health, 0, di);
-		if (ret) {
-			pr_err("error reading health\n");
-			return ret;
-		}
-		di->health_pre = health;
-	}
-
-	return di->health_pre;
-}
-
 static int bq27541_get_battery_mvolts(void)
 {
 	return bq27541_battery_voltage(bq27541_di);
@@ -810,11 +766,6 @@ static int bq27541_get_battery_mvolts(void)
 static int bq27541_get_batt_remaining_capacity(void)
 {
 	return bq27541_remaining_capacity(bq27541_di);
-}
-
-static int bq27541_get_batt_health(void)
-{
-	return bq27541_batt_health(bq27541_di);
 }
 
 static int bq27541_get_battery_temperature(void)
@@ -858,16 +809,16 @@ static int bq27541_set_lcd_off_status(int off)
 {
 	int soc,ret;
 
-	pr_info("off=%d\n", off);
+	pr_debug("off=%d\n", off);
 	if (bq27541_di) {
 		if (off) {
 			ret = bq27541_read(BQ27541_REG_SOC, &soc, 0, bq27541_di);
 			if (ret) {
 				bq27541_di->lcd_off_delt_soc=0;
-				pr_err("soc error reading ret=%d,soc%d\n", ret, soc);
+				pr_err("soc error reading ret=%d\n", ret);
 			} else {
 				bq27541_di->lcd_off_delt_soc = bq27541_di->soc_pre-soc;
-				pr_info("lcd_off_delt_soc:%d,soc=%d,soc_pre=%d\n",
+				pr_debug("lcd_off_delt_soc:%d,soc=%d,soc_pre=%d\n",
 						bq27541_di->lcd_off_delt_soc, soc,
 						bq27541_di->soc_pre);
 			}
@@ -903,7 +854,7 @@ static struct external_battery_gauge bq27541_batt_gauge = {
 	.is_battery_temp_within_range   = bq27541_is_battery_temp_within_range,
 	.is_battery_id_valid        = bq27541_is_battery_id_valid,
 	.get_batt_remaining_capacity        =bq27541_get_batt_remaining_capacity,
-	.get_batt_health        = bq27541_get_batt_health,
+
 	.get_battery_soc            = bq27541_get_battery_soc,
 	.get_average_current        = bq27541_get_average_current,
 	.set_alow_reading		= bq27541_set_alow_reading,
@@ -948,7 +899,7 @@ static bool get_dash_started(void)
 static void update_battery_soc_work(struct work_struct *work)
 {
 	if(is_usb_pluged()== true) {
-		queue_delayed_work(system_power_efficient_wq,
+		schedule_delayed_work(
 				&bq27541_di->battery_soc_work,
 				msecs_to_jiffies(BATTERY_SOC_UPDATE_MS));
 		if(get_dash_started()==true)
@@ -964,9 +915,8 @@ static void update_battery_soc_work(struct work_struct *work)
 	bq27541_get_battery_soc();
 	bq27541_get_batt_remaining_capacity();
 	bq27541_set_alow_reading(false);
-	queue_delayed_work(system_power_efficient_wq,
-		&bq27541_di->battery_soc_work,
-		msecs_to_jiffies(BATTERY_SOC_UPDATE_MS));
+	schedule_delayed_work(&bq27541_di->battery_soc_work,
+			msecs_to_jiffies(BATTERY_SOC_UPDATE_MS));
 }
 
 bool get_extern_fg_regist_done(void)
@@ -1026,10 +976,9 @@ static void bq27541_hw_config(struct work_struct *work)
 		pr_err("Failed to config Bq27541\n");
 		/* Add for retry when config fail */
 		di->retry_count--;
-		if (di->retry_count > 0) {
-			queue_delayed_work(system_power_efficient_wq,
-				&di->hw_config, HZ);
-		} else
+		if(di->retry_count > 0)
+			schedule_delayed_work(&di->hw_config, HZ);
+		else
 			bq27541_regist_done = true;
 
 		return;
@@ -1038,7 +987,6 @@ static void bq27541_hw_config(struct work_struct *work)
 	ret = is_battery_type_right(di);
 	if(!ret)
 		return;
-	external_battery_gauge_register(&bq27541_batt_gauge);
 	bq27541_information_register(&bq27541_batt_gauge);
 	bq27541_cntl_cmd(di, BQ27541_SUBCMD_CTNL_STATUS);
 	udelay(66);
@@ -1223,121 +1171,148 @@ static int bq27541_parse_dt(struct bq27541_device_info *di)
 	return 0;
 }
 
+static enum power_supply_property bq27541_props[] = {
+	POWER_SUPPLY_PROP_BATTERY_TYPE,
+	POWER_SUPPLY_PROP_CAPACITY,
+	POWER_SUPPLY_PROP_CURRENT_NOW,
+	POWER_SUPPLY_PROP_VOLTAGE_NOW,
+	POWER_SUPPLY_PROP_TEMP,
+};
+
+static int bq27541_get_property(struct power_supply *psy,
+				       enum power_supply_property psp,
+				       union power_supply_propval *val)
+{
+	switch (psp) {
+	case POWER_SUPPLY_PROP_BATTERY_TYPE:
+		val->strval = "itech_3000mah";
+		break;
+	case POWER_SUPPLY_PROP_CAPACITY:
+		val->intval = bq27541_get_battery_soc();
+		break;
+	case POWER_SUPPLY_PROP_CURRENT_NOW:
+		val->intval = bq27541_get_average_current();
+		break;
+	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
+		val->intval = bq27541_get_battery_mvolts();
+		break;
+	case POWER_SUPPLY_PROP_TEMP:
+		val->intval = bq27541_get_battery_temperature();
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int bq27541_set_property(struct power_supply *psy,
+				  enum power_supply_property psp,
+				  const union power_supply_propval *val)
+{
+	switch (psp) {
+	case POWER_SUPPLY_PROP_SET_ALLOW_READ_EXTERN_FG_IIC:
+		bq27541_set_alow_reading(val->intval);
+		break;
+	case POWER_SUPPLY_PROP_UPDATE_LCD_IS_OFF:
+		bq27541_set_lcd_off_status(val->intval);
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	return 0;
+};
+
+static char *bq27541_supplicants[] = {
+	"battery"
+};
+
 static int bq27541_battery_probe(struct i2c_client *client,
 		const struct i2c_device_id *id)
 {
 	struct bq27541_device_info *di;
-	struct bq27541_access_methods *bus;
-	int num;
-	int retval = 0;
+	int ret;
 
 	if (!i2c_check_functionality(client->adapter, I2C_FUNC_I2C))
 		return -ENODEV;
-	update_pre_capacity_data.workqueue = create_workqueue("update_pre_capacity");
-	INIT_DELAYED_WORK(&(update_pre_capacity_data.work), update_pre_capacity_func);
-
-	mutex_lock(&battery_mutex);
-	num = idr_alloc(&battery_id, client, 0, 0, GFP_KERNEL);
-	mutex_unlock(&battery_mutex);
-	if (retval < 0)
-		return retval;
 
 	di = kzalloc(sizeof(*di), GFP_KERNEL);
 	if (!di) {
-		pr_err("failed to allocate device info data\n");
-		retval = -ENOMEM;
-		goto batt_failed_1;
+		dev_err(&client->dev, "failed to allocate device info data\n");
+		return -ENOMEM;
 	}
-	di->id = num;
 
-	bus = kzalloc(sizeof(*bus), GFP_KERNEL);
-	if (!bus) {
-		pr_err("failed to allocate access method data\n");
-		retval = -ENOMEM;
-		goto batt_failed_2;
-	}
+	update_pre_capacity_data.workqueue = create_workqueue("update_pre_capacity");
+	INIT_DELAYED_WORK(&(update_pre_capacity_data.work), update_pre_capacity_func);
 
 	i2c_set_clientdata(client, di);
 	di->dev = &client->dev;
-	bus->read = &bq27541_read_i2c;
-	di->bus = bus;
 	di->client = client;
 	bq27541_parse_dt(di);
 
 	wake_lock_init(&di->update_soc_wake_lock,
 			WAKE_LOCK_SUSPEND, "bq_delt_soc_wake_lock");
 	di->soc_pre = DEFAULT_INVALID_SOC_PRE;
-	di->temp_pre = 0;
 	di->alow_reading = true;
 	/* Add for retry when config fail */
 	di->retry_count = MAX_RETRY_COUNT;
 	atomic_set(&di->suspended, 0);
 
-
 #ifdef CONFIG_BQ27541_TEST_ENABLE
 	platform_set_drvdata(&this_device, di);
-	retval = platform_device_register(&this_device);
-	if (!retval) {
-		retval = sysfs_create_group(&this_device.dev.kobj,
+	ret = platform_device_register(&this_device);
+	if (!ret) {
+		ret = sysfs_create_group(&this_device.dev.kobj,
 				&fs_attr_group);
-		if (retval)
-			goto batt_failed_3;
+		if (ret)
+			goto batt_failed_1;
 	} else
-		goto batt_failed_3;
+		goto batt_failed_1;
 #endif
-
-	if (retval) {
-		pr_err("failed to setup bq27541\n");
-		goto batt_failed_3;
-	}
-
-	if (retval) {
-		pr_err("failed to powerup bq27541\n");
-		goto batt_failed_3;
-	}
 
 	spin_lock_init(&lock);
 
 	bq27541_di = di;
-	di->lcd_is_off=false;
 	INIT_WORK(&di->counter, bq27541_coulomb_counter_work);
 	INIT_DELAYED_WORK(&di->hw_config, bq27541_hw_config);
 	INIT_DELAYED_WORK(&di->battery_soc_work, update_battery_soc_work);
-	queue_delayed_work(system_power_efficient_wq,
-		&di->hw_config, BQ27541_INIT_DELAY);
-	queue_delayed_work(system_power_efficient_wq,
-		&di->battery_soc_work, BATTERY_SOC_UPDATE_MS);
-	pr_info("probe sucdess\n");
+	schedule_delayed_work(&di->hw_config, BQ27541_INIT_DELAY);
+	schedule_delayed_work(&di->battery_soc_work, BATTERY_SOC_UPDATE_MS);
 	check_bat_type(di);
+
+	di->bq_psy.name = "bms";
+	di->bq_psy.type = POWER_SUPPLY_TYPE_BMS;
+	di->bq_psy.properties = bq27541_props;
+	di->bq_psy.num_properties = ARRAY_SIZE(bq27541_props);
+	di->bq_psy.get_property = bq27541_get_property;
+	di->bq_psy.set_property = bq27541_set_property;
+	di->bq_psy.supplied_to = bq27541_supplicants;
+	di->bq_psy.num_supplicants = ARRAY_SIZE(bq27541_supplicants);
+
+	ret = power_supply_register(&client->dev, &di->bq_psy);
+	if (ret < 0) {
+		dev_err(&client->dev, "failed to register, ret = %d\n", ret);
+		goto batt_failed_1;
+	}
+
+	dev_info(&client->dev, "probe success\n");
+
 	return 0;
 
-batt_failed_3:
-	kfree(bus);
-batt_failed_2:
-	kfree(di);
 batt_failed_1:
-	mutex_lock(&battery_mutex);
-	idr_remove(&battery_id, num);
-	mutex_unlock(&battery_mutex);
-
-	return retval;
+	kfree(di);
+	return ret;
 }
 
 static int bq27541_battery_remove(struct i2c_client *client)
 {
 	struct bq27541_device_info *di = i2c_get_clientdata(client);
-	external_battery_gauge_unregister(&bq27541_batt_gauge);
 	bq27541_information_unregister(&bq27541_batt_gauge);
 	bq27541_cntl_cmd(di, BQ27541_SUBCMD_DISABLE_DLOG);
 	udelay(66);
 	bq27541_cntl_cmd(di, BQ27541_SUBCMD_DISABLE_IT);
 	cancel_delayed_work_sync(&di->hw_config);
-
-	kfree(di->bus);
-
-	mutex_lock(&battery_mutex);
-	idr_remove(&battery_id, di->id);
-	mutex_unlock(&battery_mutex);
 
 	kfree(di);
 	return 0;
@@ -1382,9 +1357,8 @@ static int bq27541_battery_resume(struct i2c_client *client)
 		queue_delayed_work(update_pre_capacity_data.workqueue,
 				&(update_pre_capacity_data.work), msecs_to_jiffies(1000));
 	}
-	queue_delayed_work(system_power_efficient_wq,
-		&bq27541_di->battery_soc_work,
-		msecs_to_jiffies(RESUME_SCHDULE_SOC_UPDATE_WORK_MS));
+	schedule_delayed_work(&bq27541_di->battery_soc_work,
+			msecs_to_jiffies(RESUME_SCHDULE_SOC_UPDATE_WORK_MS));
 	return 0;
 }
 static void bq27541_shutdown(struct i2c_client *client)

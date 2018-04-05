@@ -2012,7 +2012,7 @@ static int send_notification(struct rq *rq, int check_pred, int check_groups)
 	unsigned int cur_freq, freq_required;
 	unsigned long flags;
 	int rc = 0;
-	u64 group_load = 0, new_load;
+	u64 group_load = 0, new_load = 0;
 
 	if (!sched_enable_hmp)
 		return 0;
@@ -3849,6 +3849,8 @@ static void transfer_busy_time(struct rq *rq, struct related_thread_group *grp,
 		dst_nt_curr_runnable_sum = &rq->nt_curr_runnable_sum;
 		src_nt_prev_runnable_sum = &cpu_time->nt_prev_runnable_sum;
 		dst_nt_prev_runnable_sum = &rq->nt_prev_runnable_sum;
+	} else {
+		return;
 	}
 
 	*src_curr_runnable_sum -= p->ravg.curr_window;
@@ -8268,21 +8270,24 @@ static struct rq *move_queued_task(struct task_struct *p, int new_cpu)
 	return rq;
 }
 
-static const struct cpumask *adjust_cpumask(const struct task_struct *p,
-	const struct cpumask *old_mask)
+static void get_adjusted_cpumask(const struct task_struct *p,
+	struct cpumask *new_mask, const struct cpumask *old_mask)
 {
-	static const unsigned long allowed_cpus = 0x3;
+	static const unsigned long little_cluster_cpus = 0x3;
 
-	if (!(p->flags & PF_KTHREAD) || p->kthread_per_cpu)
-		return old_mask;
-
-	/* Force as many kthreads as possible to run on the little cluster */
-	return to_cpumask(&allowed_cpus);
+	/* Force all unbound kthreads onto the little cluster */
+	if (p->flags & PF_KTHREAD && cpumask_weight(old_mask) > 1)
+		cpumask_copy(new_mask, to_cpumask(&little_cluster_cpus));
+	else
+		cpumask_copy(new_mask, old_mask);
 }
 
 void do_set_cpus_allowed(struct task_struct *p, const struct cpumask *new_mask)
 {
-	new_mask = adjust_cpumask(p, new_mask);
+	cpumask_t adjusted_mask;
+
+	get_adjusted_cpumask(p, &adjusted_mask, new_mask);
+	new_mask = &adjusted_mask;
 
 	if (p->sched_class && p->sched_class->set_cpus_allowed)
 		p->sched_class->set_cpus_allowed(p, new_mask);
@@ -8320,8 +8325,11 @@ int set_cpus_allowed_ptr(struct task_struct *p, const struct cpumask *new_mask)
 	struct rq *rq;
 	unsigned int dest_cpu;
 	int ret = 0;
+	cpumask_t adjusted_mask;
 
-	new_mask = adjust_cpumask(p, new_mask);
+	get_adjusted_cpumask(p, &adjusted_mask, new_mask);
+	new_mask = &adjusted_mask;
+
 	rq = task_rq_lock(p, &flags);
 
 	if (cpumask_equal(&p->cpus_allowed, new_mask))

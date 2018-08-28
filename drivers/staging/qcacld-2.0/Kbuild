@@ -185,10 +185,10 @@ endif
 # Feature flags which are not (currently) configurable via Kconfig
 
 #Whether to build debug version
-BUILD_DEBUG_VERSION := 1
+BUILD_DEBUG_VERSION := 0
 
 #Enable this flag to build driver in diag version
-BUILD_DIAG_VERSION := 1
+BUILD_DIAG_VERSION := 0
 
 #Do we panic on bug?  default is to warn
 PANIC_ON_BUG := 1
@@ -1683,6 +1683,8 @@ endif
 ifeq ($(call cc-option-yn, -Wheader-guard),y)
 EXTRA_CFLAGS += -Wheader-guard
 endif
+
+EXTRA_CFLAGS += -Wno-unused-function -Wno-unused-variable -Wno-misleading-indentation
 
 # If the module name is not "wlan", then the define MULTI_IF_NAME to be the
 # same a the QCA CHIP name. The host driver will then append MULTI_IF_NAME to

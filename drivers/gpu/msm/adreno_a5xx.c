@@ -149,6 +149,20 @@ static void a530_efuse_speed_bin(struct adreno_device *adreno_dev)
 	adreno_dev->speed_bin = (val & speed_bin[1]) >> speed_bin[2];
 }
 
+static void a530_efuse_firmware_name(struct adreno_device *adreno_dev)
+{
+	int rc;
+	struct kgsl_device *device = &adreno_dev->dev;
+	const char *name = NULL;
+
+	rc = of_property_read_string(device->pdev->dev.of_node,
+			"qcom,firmware-name", &name);
+	if (!rc) {
+		adreno_dev->zap_name_override = name;
+		pr_info("kgsl: use zap firmware : %s\n", name);
+	}
+}
+
 static const struct {
 	int (*check)(struct adreno_device *adreno_dev);
 	void (*func)(struct adreno_device *adreno_dev);
@@ -156,6 +170,7 @@ static const struct {
 	{ adreno_is_a530, a530_efuse_leakage },
 	{ adreno_is_a530, a530_efuse_speed_bin },
 	{ adreno_is_a505, a530_efuse_speed_bin },
+	{ adreno_is_a530, a530_efuse_firmware_name },
 };
 
 static void a5xx_check_features(struct adreno_device *adreno_dev)
@@ -2189,7 +2204,6 @@ static int a5xx_microcode_load(struct adreno_device *adreno_dev)
 	void *ptr;
 	struct kgsl_device *device = KGSL_DEVICE(adreno_dev);
 	uint64_t gpuaddr;
-	const char *zap_name;
 
 	gpuaddr = adreno_dev->pm4.gpuaddr;
 	kgsl_regwrite(device, A5XX_CP_PM4_INSTR_BASE_LO,
@@ -2226,11 +2240,12 @@ static int a5xx_microcode_load(struct adreno_device *adreno_dev)
 	}
 
 	/* Load the zap shader firmware through PIL if its available */
-	if (!zap_ucode_loaded) {
-		if (of_property_read_string(device->pdev->dev.of_node, "cm,firmware-name", &zap_name))
-			zap_name = adreno_dev->gpucore->zap_name;
-		if (zap_name)
-			ptr = subsystem_get(zap_name);
+	if ((adreno_dev->gpucore->zap_name || adreno_dev->zap_name_override) &&
+		!zap_ucode_loaded) {
+		if (adreno_dev->zap_name_override)
+			ptr = subsystem_get(adreno_dev->zap_name_override);
+		else
+			ptr = subsystem_get(adreno_dev->gpucore->zap_name);
 
 		/* Return error if the zap shader cannot be loaded */
 		if (IS_ERR_OR_NULL(ptr))
